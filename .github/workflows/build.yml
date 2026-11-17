@@ -1,0 +1,20 @@
+name: Build and test
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  fedora:
+    runs-on: ubuntu-latest
+    container: fedora:45
+    steps:
+      - name: Install build dependencies
+        run: >-
+          dnf install -y git cmake ninja-build gcc-c++ extra-cmake-modules
+          qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel
+          kf6-ktexteditor-devel kf6-kcoreaddons-devel kf6-kxmlgui-devel
+          kf6-ki18n-devel kf6-syntax-highlighting-devel dbus-daemon util-linux
+      - uses: actions/checkout@v4
+      - name: Build and run isolated tests
+        run: dbus-run-session -- ./scripts/test.sh
+        env:
+          KATE_MARKDOWN_BUILD_JOBS: 2

@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "scripts": {"build": "esbuild engine.js --bundle --format=iife --global-name=KateMath --platform=neutral --target=es2017 --minify --outfile=../../third_party/mathjax/engine.js"},
+  "dependencies": {"mathjax-full": "3.2.2"},
+  "devDependencies": {"esbuild": "0.28.2"}
+}

@@ -1,0 +1,4 @@
+<!DOCTYPE gui>
+<gui name="katemarkdownlive" version="1">
+  <MenuBar><Menu name="view"><Action name="markdown_live_toggle"/><Action name="markdown_live_remote_images"/></Menu></MenuBar>
+</gui>
