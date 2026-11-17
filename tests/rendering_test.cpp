@@ -1,6 +1,6 @@
 #include "mathrenderer.h"
 #include "mediastore.h"
-#include "renderdocument.h"
+#include "richdocument.h"
 #include <QTest>
 #include <QBuffer>
 #include <QElapsedTimer>
@@ -89,10 +89,10 @@ private Q_SLOTS:
         QVERIFY(oversized.open(QIODevice::WriteOnly)); QVERIFY(oversized.resize(9 * 1024 * 1024)); oversized.close();
         QVERIFY(!media.request(QUrl::fromLocalFile(oversized.fileName()))->error.isEmpty());
         MathRenderer math;
-        Block block{0, 0, QStringLiteral("<p><img src=\"%1\"></p>").arg(QUrl::fromLocalFile(path).toString()), false, {}, {}};
-        RenderDocument document(block, QUrl::fromLocalFile(directory.path() + '/'), QFont(), QPalette(), {}, 300, 1, &math, &media);
-        const auto image = document.resource(QTextDocument::ImageResource, QUrl::fromLocalFile(path)).value<QImage>();
-        QCOMPARE(image.size(), QSize(300, 200));
+        RichDocument document(&math, &media, nullptr);
+        QVERIFY(document.render(QStringLiteral("![image](%1)").arg(QUrl::fromLocalFile(path).toString(QUrl::FullyEncoded)), {}, QPalette(), 300));
+        const auto format = document.begin().begin().fragment().charFormat();
+        QCOMPARE(document.findChild<RichObjects *>()->intrinsicSize(&document, 0, format), QSizeF(300, 200));
         QVERIFY(media.cacheCost() <= 16 * 1024);
     }
     void remoteImages()
@@ -124,38 +124,39 @@ private Q_SLOTS:
         QImage original(1200, 800, QImage::Format_RGB32); original.fill(Qt::green);
         QVERIFY(original.save(path));
         MediaStore media; MathRenderer math;
-        const auto block = parse("![photo](photo.png)\n").blocks.first();
-        RenderDocument document(block, QUrl::fromLocalFile(directory.path() + '/'), QFont(), QPalette(), {}, 600, 1, &math, &media);
+        RichDocument document(&math, &media, nullptr);
+        QVERIFY(document.render("![photo](photo.png)\n", QUrl::fromLocalFile(directory.path() + '/'), QPalette(), 600));
+        const auto height = document.size().height();
         for (int i = 0; i < 80; ++i) {
-            const auto image = document.resource(QTextDocument::ImageResource, QUrl("photo.png")).value<QImage>();
-            QCOMPARE(image.size(), QSize(600, 400));
-            QCOMPARE(image.pixelColor(100, 100), QColor(Qt::green));
             QImage canvas(640, 480, QImage::Format_RGB32); canvas.fill(Qt::white);
             QPainter painter(&canvas); painter.translate(0, -(i % 5) * 20);
-            document.drawContents(&painter);
+            document.drawContents(&painter); painter.end();
+            QCOMPARE(canvas.pixelColor(100, 100), QColor(Qt::green));
+            QCOMPARE(document.size().height(), height);
+            QVERIFY(media.cacheCost() <= 16 * 1024);
         }
     }
+
     void inlineAndDisplayDocument()
     {
         const auto parsed = parse("Text $\\frac{1}{2}$ after.\n\n$$\n\\sum_{n=1}^N n\n$$\n");
         MathRenderer math; MediaStore media;
         for (const auto &block : parsed.blocks) for (const auto &span : block.math)
             QTRY_VERIFY_WITH_TIMEOUT(math.request(span.source, span.display), 15000);
+        RichDocument doc(&math,&media,nullptr); doc.setDefaultFont(QFont("DejaVu Sans",12));
+        QVERIFY(doc.render("Text $\\frac{1}{2}$ after.\n\n$$\n\\sum_{n=1}^N n\n$$\n",{},QPalette(),600));
         int images = 0;
-        for (const auto &block : parsed.blocks) {
-            RenderDocument doc(block, {}, QFont("DejaVu Sans", 12), QPalette(), {}, 600, 2, &math, &media);
-            for (auto b = doc.begin(); b.isValid(); b = b.next()) for (auto it = b.begin(); !it.atEnd(); ++it) {
-                const auto format = it.fragment().charFormat();
-                if (!format.isImageFormat()) continue;
-                ++images;
-                const auto imageFormat = format.toImageFormat();
-                const auto image = doc.resource(QTextDocument::ImageResource, imageFormat.name()).value<QImage>();
-                QVERIFY(!image.isNull()); QCOMPARE(image.devicePixelRatio(), 2);
-                QVERIFY(imageFormat.height() > 10 && imageFormat.width() > 2);
-            }
+        for (auto b = doc.begin(); b.isValid(); b = b.next()) for (auto it = b.begin(); !it.atEnd(); ++it) {
+            const auto format = it.fragment().charFormat();
+            if (format.objectType() != RichObjects::Type) continue;
+            ++images;
+            const auto size = doc.findChild<RichObjects *>()->intrinsicSize(&doc,it.fragment().position(),format);
+            QVERIFY(size.height()>10 && size.width()>2);
         }
-        QCOMPARE(images, 2);
+        QCOMPARE(images,2);
+        QVERIFY(!doc.toPlainText().contains("$"));
     }
+
     void cancelledRemoteRequestCanRetry()
     {
         QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
@@ -188,17 +189,18 @@ private Q_SLOTS:
     }
     void formulaFollowsPaletteAndFont()
     {
-        const auto block = parse("$x^2$").blocks.first();
         MathRenderer math; MediaStore media;
         QTRY_VERIFY_WITH_TIMEOUT(math.request("x^2", false), 15000);
         qreal previousWidth = 0;
         for (int size : {10, 20}) {
             QPalette palette; palette.setColor(QPalette::Text, QColor("#23c658"));
-            RenderDocument doc(block, {}, QFont("DejaVu Sans", size), palette, {}, 600, 2, &math, &media);
-            const auto format = doc.begin().begin().fragment().charFormat().toImageFormat();
-            QVERIFY(format.width() > previousWidth); previousWidth = format.width();
-            const auto image = doc.resource(QTextDocument::ImageResource, format.name()).value<QImage>();
-            QVERIFY(!image.isNull());
+            RichDocument doc(&math,&media,nullptr); doc.setDefaultFont(QFont("DejaVu Sans",size));
+            QVERIFY(doc.render("$x^2$",{},palette,600));
+            const auto format = doc.begin().begin().fragment().charFormat();
+            const auto dimensions = doc.findChild<RichObjects *>()->intrinsicSize(&doc,0,format);
+            QVERIFY(dimensions.width() > previousWidth); previousWidth = dimensions.width();
+            QImage image(640,200,QImage::Format_ARGB32_Premultiplied); image.fill(Qt::transparent);
+            QPainter painter(&image); doc.drawContents(&painter); painter.end();
             int coloredPixels = 0;
             for (int y = 0; y < image.height(); ++y) for (int x = 0; x < image.width(); ++x) {
                 const auto color = image.pixelColor(x, y);

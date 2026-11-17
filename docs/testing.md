@@ -1,53 +1,46 @@
 # Test results
 
 Environment: Fedora 45, Kate 26.08.2, Qt 6.11.2, KDE Frameworks 6.31 and GCC 16.2.
-Sanitizer builds use Clang 23.1.5. Recorded on 2026-11-17.
+Sanitizer builds use Clang 23.1.5. Recorded on 2026-11-17 for version 0.3.0.
 
 ## Automated tests
 
-`scripts/test.sh` runs three Qt Test executables with 43 passing functional cases/data rows,
-excluding setup and cleanup. CTest also runs ECM's metadata check, making 4 suites in total.
-Tests use isolated XDG directories and Qt's offscreen platform, leaving user Kate sessions
-untouched. HTTP image tests use a loopback mock server without external network requests.
+Three Qt Test executables cover 101 functional cases/data rows, excluding setup and cleanup.
+Together with ECM's metadata check, CTest runs four suites. Tests use isolated XDG directories
+and Qt's offscreen platform. HTTP tests use a loopback server, without external requests.
 
-Local 0.2.1 results: normal build 4/4 passed in approximately 4.2 seconds;
-ASan + UBSan + LeakSanitizer build 4/4 passed in approximately 8.1 seconds,
-with no suppressions or skipped cases.
+The release and ASan + UBSan + LeakSanitizer builds pass all four suites, without suppressions
+or skipped cases. The coverage includes:
 
-- CommonMark/GFM headings, emphasis, strikethrough, tables, tasks, reference links and code languages.
-- Source partitions including invisible definitions and whitespace; 300 seeded random Markdown inputs.
-- Minimal UTF-16 edits, CJK/emoji, non-breaking spaces and Unicode line/paragraph separators.
-- Input-method preedit stays out of the source; only committed text is inserted.
-- Kate undo, cross-block deletion, select-all replacement, read-only changes, external edits
-  from another view and synchronous formatter callbacks.
-- Native plugin factory loading, saving real documents, toggling, resizing and unloading.
-- Font/palette inheritance, the 48-layout cache limit and no full parse on each keystroke.
-- Repeated splitter enlargement/shrinking without native child surfaces intercepting input.
-- Fourteen math delimiter cases: Unicode, escapes, currency, code, links, lists, quotes,
-  tables and placeholder collisions.
-- Twenty inline/display formula conversions: fractions, roots, integrals, sums, matrices,
-  aligned expressions, cases and math fonts. Validate SVG, nonempty pixels, embedded objects,
-  DPI, font size and text color.
-- Invalid formulas, recursive macros, macro isolation, oversized input, bounded queues and
-  destruction while a background task is pending.
-- Dense unclosed delimiters and long backslash runs have bounded scan work and preserve source partitions.
-- Pasted image files, relative paths, undo retaining assets, Unicode filenames, scaling,
-  missing/corrupt/oversized images.
-- Asynchronous image downloads, default-disabled remote access, cancellation/retry and queue cleanup.
-- Repeated image resource requests and painting retain the image instead of charging the
-  per-block byte limit on every repaint. This regression failed before the cache fix.
-- Automatic activation for existing/new Markdown views and Save As, with manual opt-out
-  preserved across tab switches and filename changes. Focus restored by Kate is transferred
-  to RTR, preventing input from reaching the covered source editor.
-- Esc remains available to a host panel-close action in both rendered and block-editing modes;
-  Ctrl+Enter finishes a block without inserting a newline.
+- Continuous editing of rendered Markdown, incomplete delimiters, nested emphasis, links,
+  escaped characters, HTML entities, Unicode and inline/fenced/indented code.
+- Exact source edits through formatting boundaries, repeated visible words, GFM table escapes,
+  empty and automatically padded table cells, headings, lists and paragraph breaks.
+- Preserving formatting during selection replacement and repairing partially selected wrappers.
+- Native click, Shift+click and select-all behavior without source expansion. Forty scroll/click
+  cycles across a long document retain document geometry, scroll range and parse count.
+- Repeated clicks, double-clicks, Shift selections, arrow/Home/End navigation and programmatic
+  caret positioning beside tall images retain the exact vertical scroll offset. Explicit wheel
+  scrolling remains functional.
+- Incremental word edits: 600 insertions/deletions in a 1000-block document without a full parse.
+- IME preedit and commit, non-breaking spaces, emoji, read-only mode, external changes and
+  synchronous formatter callbacks.
+- Real KTextEditor undo/redo, saving, automatic activation, manual opt-out, focus redirection,
+  plugin loading/unloading and editor split shrinking.
+- Host Escape shortcuts remain available while RTR is focused.
+- Theme/font inheritance and rendered code layout after applying Kate syntax highlighting.
+- Image paste with atomic asset saving, relative and Unicode paths, undo retaining assets,
+  repeated painting, missing/corrupt/oversized files and bounded decoding/cache use.
+- Optional remote images, cancellation/retry, bounded queues and asynchronous shutdown.
+- Twenty inline/display MathJax conversions, SVG validity, rendered objects, font sizing and
+  text color. Invalid/recursive formulas, macro isolation, queue limits and background teardown.
+- Markdown parser partition checks, seeded malformed input and bounded math scanning.
 
-A local RelWithDebInfo run parsed 82,890 UTF-16 units / 4000 blocks in 9 ms.
-Three hundred source-preserving edits took approximately 0.33 seconds, including KTextEditor
-updates and assertions. The twenty-formula test took about 1.23 seconds, including engine
-cold start and Qt Test polling delays; it is not a pure conversion benchmark.
-These are observations on this machine, not cross-machine performance guarantees. Broad
-regression ceilings catch severe slowdowns without treating ordinary CI timing variation as failure.
+The final release run passed in 5.68 seconds; the sanitizer run passed in 13.45 seconds.
+The 600-edit test completed in about 0.5 seconds in Release and 2.4 seconds with sanitizers.
+Detailed results are included with the release artifacts. They are measurements on this
+machine, not cross-machine guarantees. Broad latency ceilings catch regressions; source
+preservation and parse-count assertions verify the incremental path independently of timing.
 
 AddressSanitizer, UndefinedBehaviorSanitizer and LeakSanitizer configuration:
 
@@ -65,17 +58,15 @@ ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
 
 ## Real Kate smoke check
 
-Load the built plugin into an isolated D-Bus/Xvfb Kate session, enable it and send actual
-keyboard events: automatic live rendering → Enter → edit the heading → Ctrl+S → Ctrl+Enter.
-Use [demo.md](demo.md) with a relative SVG image and compare the saved file byte for byte
-against the expected edit. Inspect table equations, code highlighting, inline math, display
-`aligned` math and the local image. Capture the entire Kate window:
-[rendered view](real-kate.png) and [in-place source editing](real-kate-edit.png).
-Separate XDG directories keep the user's existing session unchanged.
+Load the stripped release plugin into an isolated D-Bus/Xvfb Kate session. Open
+[demo.md](demo.md), let RTR activate automatically, position the caret in its rendered heading,
+type, save with Ctrl+S and compare the file byte for byte with the expected Markdown edit.
+Select the heading with Shift+End and verify that its layout remains rendered.
 
-Repeat loading, editing, saving and exiting using the stripped release plugin installed into
-a temporary prefix. The binary release targets the Qt/KF environment listed above;
-rebuild from source on other platforms or incompatible versions.
+Inspect highlighted Python code, table equations, inline and display math, and the relative SVG
+image. Capture the complete Kate window: [editing surface](real-kate.png) and
+[native text selection](real-kate-edit.png). Exit Kate cleanly. Separate XDG directories leave
+existing user sessions unchanged.
 
-This does not certify every Typora interaction or every distribution. See README for limits
-on complete LaTeX, Mermaid, cross-block drag selections and remote image loading.
+The binary release targets the environment listed above; rebuild from source on incompatible
+Qt/KF versions. README documents supported syntax, atomic image/math editing and resource limits.

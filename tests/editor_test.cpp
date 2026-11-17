@@ -8,7 +8,10 @@
 #include <KSyntaxHighlighting/Theme>
 #include <KActionCollection>
 #include <QAction>
-#include <QPlainTextEdit>
+#include "richdocument.h"
+#include "mathrenderer.h"
+#include "mediastore.h"
+#include <QAbstractTextDocumentLayout>
 #include <QTest>
 #include <QScrollBar>
 #include <QPluginLoader>
@@ -20,6 +23,9 @@
 #include <QSplitter>
 #include <QClipboard>
 #include <QRegularExpression>
+#include <QTextTable>
+#include <QTextBlock>
+#include <QWheelEvent>
 #include <memory>
 
 using namespace MarkdownLive;
@@ -42,22 +48,191 @@ class EditorTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
-    void editingFormulaPreservesSurroundingSource()
+    void richSyntax_data()
+    {
+        QTest::addColumn<QString>("source"); QTest::addColumn<QString>("visible");
+        QTest::newRow("bold") << "A **bold** and *emphasis*." << "A bold and emphasis.";
+        QTest::newRow("incomplete") << "A **bold and `code" << "A **bold and `code";
+        QTest::newRow("links") << "[label](https://example.org) and <https://example.org>" << "label and https://example.org";
+        QTest::newRow("entities") << "A &amp; &#128512; \\*literal\\*" << QString::fromUtf8("A & \U0001f600 *literal*");
+        QTest::newRow("code") << "A `code` and `` a ` b ``." << "A code and a ` b.";
+        QTest::newRow("heading") << "# Title\n\nBody\n" << "Title\nBody";
+        QTest::newRow("setext") << "Title\n===\n\nBody" << "Title\nBody";
+        QTest::newRow("unicode") << QString::fromUtf8("# \u4e2d\u6587 \U0001f600\n\n**\u8f93\u5165**\u00a0text") << QString::fromUtf8("\u4e2d\u6587 \U0001f600\n\u8f93\u5165 text");
+        QTest::newRow("fence") << "```cpp\nint a = 1;\n```" << "int a = 1;\n";
+        QTest::newRow("unclosed-fence") << "```cpp\nint a = 1;" << "```cpp\nint a = 1;";
+        QTest::newRow("math") << "A $x^2$ and **bold**." << QString("A \ufffc and bold.");
+        QTest::newRow("display-math") << "$$\nx^2\n$$\n\nBody" << QString("\ufffc\nBody");
+        QTest::newRow("image") << "![alt](missing.png) after" << QString("\ufffc after");
+        QTest::newRow("list") << "- first\n- **second**\n" << "first\nsecond";
+        QTest::newRow("task") << "- [x] done\n- [ ] next" << QString("\u2611 done\n\u2610 next");
+        QTest::newRow("quote") << "> quoted **text**\n> continued" << "quoted text continued";
+        QTest::newRow("spaces") << "one   two\ncontinued" << "one two continued";
+        QTest::newRow("rule") << "---\n\nbody" << QString("\ufffc\nbody");
+        QTest::newRow("raw-html") << "a <b>raw</b>" << "a <b>raw</b>";
+    }
+    void richSyntax()
+    {
+        QFETCH(QString, source); QFETCH(QString, visible);
+        MathRenderer math; MediaStore media; RichDocument rich(&math, &media, nullptr);
+        QVERIFY2(rich.render(source, {}, QApplication::palette(), 600), qPrintable(source));
+        QCOMPARE(rich.toPlainText(), visible);
+        QVERIFY(!rich.toPlainText().contains("RTRMARK"));
+        QVERIFY(rich.sourcePosition(rich.characterCount() - 1) <= source.size());
+    }
+    void exactSourceEdits_data()
+    {
+        QTest::addColumn<QString>("source"); QTest::addColumn<QString>("needle"); QTest::addColumn<QString>("expected");
+        QTest::newRow("inline-code") << "A `code` end" << "code" << "A `X` end";
+        QTest::newRow("nested") << "A ***both*** end" << "both" << "A ***X*** end";
+        QTest::newRow("entity") << "A &amp; end" << "&" << "A X end";
+        QTest::newRow("escape") << "A \\* end" << "*" << "A X end";
+        QTest::newRow("reference") << "A [label][x] end\n\n[x]: /url\n" << "label" << "A [X][x] end\n\n[x]: /url\n";
+        QTest::newRow("autolink") << "A <https://example.org> end" << "https://example.org" << "A <X> end";
+        QTest::newRow("fenced-code") << "```cpp\nint value;\n```\n\nend" << "value" << "```cpp\nint X;\n```\n\nend";
+        QTest::newRow("indented-code") << "    int value;\n\nend" << "value" << "    int X;\n\nend";
+        QTest::newRow("table") << "| head | second |\n| --- | --- |\n| value | data |" << "value" << "| head | second |\n| --- | --- |\n| X | data |";
+        QTest::newRow("partial-left") << "a **bold** text" << "ld te" << "a **boX**xt";
+        QTest::newRow("partial-right") << "a **bold** text" << "a bo" << "X**ld** text";
+        QTest::newRow("partial-nested") << "a ***both*** text" << "th te" << "a ***boX***xt";
+        QTest::newRow("indented-leading") << "    first\n      second\n" << "  second" << "    first\n    X\n";
+        QTest::newRow("table-escape") << "| a | b |\n| --- | --- |\n| x\\|y | c |" << "x|y" << "| a | b |\n| --- | --- |\n| X | c |";
+        QTest::newRow("hardbreak") << "a\\\nb" << "b" << "a\\\nX";
+        QTest::newRow("task") << "- [x] value\n- [ ] next" << "value" << "- [x] X\n- [ ] next";
+        QTest::newRow("math") << "A $x$ end" << QString("\ufffc") << "A X end";
+        QTest::newRow("image") << "A ![alt](missing.png) end" << QString("\ufffc") << "A X end";
+    }
+    void exactSourceEdits()
+    {
+        QFETCH(QString, source); QFETCH(QString, needle); QFETCH(QString, expected);
+        std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
+        doc->setText(source); std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
+        LiveEditor live(view.get()); live.resize(800,600); live.show();
+        QVERIFY2(live.blockCount() > 0, qPrintable(source));
+        const int start = live.toPlainText().indexOf(needle); QVERIFY(start >= 0);
+        auto cursor = live.textCursor(); cursor.setPosition(start); cursor.setPosition(start + needle.size(),QTextCursor::KeepAnchor); live.setTextCursor(cursor);
+        QTest::keyClicks(&live,"X"); QCOMPARE(doc->text(),expected);
+    }
+    void repeatedTextUsesActualEditPosition()
     {
         std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
-        const QString source = "Inline $x^2$ and **bold**.\n\n$$\n\\frac{a}{b}\n$$\n\n![image](missing.png)\n";
-        doc->setText(source);
-        std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
-        LiveEditor live(view.get()); live.resize(800, 600); live.show();
-        QTest::qWait(200); // Allow a resource completion while editing the original source.
-        const int offset = source.indexOf("x^2") + 3;
-        live.editAt(offset);
-        QTest::keyClicks(live.input(), "+y");
-        QTest::qWait(300);
-        QVERIFY(live.input()->isVisible());
-        QCOMPARE(doc->text(), QString(source).insert(offset, "+y"));
-        live.finishEditing();
-        QCOMPARE(doc->text(), QString(source).insert(offset, "+y"));
+        const QString source = "a **a** a"; doc->setText(source);
+        std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr)); LiveEditor live(view.get());
+        live.resize(800,600); live.show(); live.editAt(1); QTest::keyClicks(&live,"a");
+        QCOMPARE(doc->text(),QString("aa **a** a"));
+        live.editAt(5); QTest::keyClicks(&live,"a"); QCOMPARE(doc->text(),QString("aa **aa** a"));
+    }
+    void paragraphsAndCodeNewlines()
+    {
+        std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
+        doc->setText("# **Title**"); std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr)); LiveEditor live(view.get());
+        live.resize(800,600); live.show(); live.editAt(9);
+        QTest::keyClick(&live, Qt::Key_Return); QCOMPARE(doc->text(),QString("# **Title**\n\n"));
+        QCOMPARE(live.toPlainText(),QString("Title\n"));
+        QTest::keyClicks(&live,"Next"); QCOMPARE(doc->text(),QString("# **Title**\n\nNext"));
+        doc->setText("```cpp\nint a;\n```\n"); live.editAt(13);
+        QTest::keyClick(&live,Qt::Key_Return); QCOMPARE(doc->text(),QString("```cpp\nint a;\n\n```\n"));
+        QVERIFY(!live.toPlainText().contains("```"));
+        doc->setText("A **bold** end"); live.editAt(6); QTest::keyClick(&live,Qt::Key_Return);
+        QCOMPARE(doc->text(),QString("A **bo**\n\n**ld** end"));
+        QCOMPARE(live.toPlainText(),QString("A bo\nld end"));
+    }
+    void largeDocumentInteriorEditsStayIncremental()
+    {
+        std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
+        QString expected = QString("## Header\n\nParagraph **bold** text.\n\n").repeated(500); doc->setText(expected);
+        std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr)); LiveEditor live(view.get()); live.resize(800,600); live.show();
+        const int parses = live.parseCount(); QElapsedTimer timer; timer.start();
+        for (int i=0;i<300;++i) {
+            const int at = expected.indexOf("Paragraph") + 3; live.editAt(at);
+            QTest::keyClicks(&live,"x"); expected.insert(at,'x');
+            QCOMPARE(doc->text(),expected);
+            // Keep the same word for the next iteration.
+            QTest::keyClick(&live,Qt::Key_Backspace); expected.remove(at,1); QCOMPARE(doc->text(),expected);
+        }
+        qInfo() << "600 edits in 1000 blocks:" << timer.elapsed() << "ms";
+        QCOMPARE(live.parseCount(),parses); QVERIFY(timer.elapsed()<5000);
+    }
+    void incompleteAndComplexSyntax_data()
+    {
+        QTest::addColumn<QString>("source");
+        const QStringList inputs = {"[incomplete](url", "![incomplete](url", "**one *two***", "&NotEqualTilde; &#0; &copy;", "  text  with spaces", "> ```python\n>     value = 1\n> ```", "    first\n      second\n", "a  \nb", "a\\\nb", "## Heading ##", "[label][ref]\n\n[ref]: /url \"Title\"", "| a | b |\n| --- | --- |\n| x\\|y | **b** |", "- outer\n  - inner\n\n    more", "one $x$two$y$ three", "```python\nvalue = 1\n``` incomplete", "\tcode\n", "# ", "[empty]()", "<https://example.org/?a=1&b=2>", "[a\\*b](/x)", "[![alt](img.png)](/x)"};
+        for (int i=0;i<inputs.size();++i) QTest::newRow(qPrintable(QString::number(i))) << inputs[i];
+    }
+    void incompleteAndComplexSyntax()
+    {
+        QFETCH(QString, source); MathRenderer math; MediaStore media; RichDocument rich(&math,&media,nullptr);
+        QVERIFY2(rich.render(source,{},QApplication::palette(),700),qPrintable(source));
+        QVERIFY(!rich.toPlainText().contains("RTRMARK"));
+    }
+    void demoRendersWithoutSourceExpansion()
+    {
+        QFile file(QStringLiteral(TEST_SOURCE_DIR "/docs/demo.md")); QVERIFY(file.open(QIODevice::ReadOnly));
+        const QString source = QString::fromUtf8(file.readAll());
+        MathRenderer math; MediaStore media; RichDocument rich(&math,&media,nullptr);
+        QVERIFY(rich.render(source,QUrl::fromLocalFile(QStringLiteral(TEST_SOURCE_DIR "/docs/")),QApplication::palette(),900));
+        QVERIFY(!rich.toPlainText().contains("RTRMARK")); QVERIFY(!rich.toPlainText().contains("$$")); QVERIFY(!rich.toPlainText().contains("```"));
+    }
+    void ordinaryEditingAndIncompleteDelimiters()
+    {
+        std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
+        doc->setText(""); std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
+        LiveEditor live(view.get()); live.resize(800,600); live.show();
+        QTest::keyClicks(&live, "**bold"); QCOMPARE(live.toPlainText(), QString("**bold"));
+        QTest::keyClicks(&live, "**"); QCOMPARE(live.toPlainText(), QString("bold"));
+        QTest::keyClicks(&live, " after"); QCOMPARE(doc->text(), QString("**bold** after"));
+        live.editAt(4); QTest::keyClicks(&live, "X"); QCOMPARE(doc->text(), QString("**boXld** after"));
+        QCOMPARE(live.toPlainText(), QString("boXld after"));
+        QTest::keyClick(&live, Qt::Key_Z, Qt::ControlModifier);
+        QVERIFY(!doc->text().contains('X'));
+        QTest::keyClick(&live, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+        QVERIFY(doc->text().contains("boXld"));
+    }
+    void browsingNeverChangesLayout()
+    {
+        std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
+        const QString source = QString("# Title\n\nParagraph **bold** and [link](/url).\n\n- one\n- two\n\n").repeated(150);
+        doc->setText(source); std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
+        LiveEditor live(view.get()); live.resize(800,600); live.show(); QTest::qWait(30);
+        const auto size = live.document()->documentLayout()->documentSize();
+        const int maximum = live.verticalScrollBar()->maximum(), parses = live.parseCount();
+        for (int i = 0; i < 40; ++i) {
+            live.verticalScrollBar()->setValue((i * 701) % maximum);
+            QTest::mouseClick(live.viewport(), Qt::LeftButton, Qt::NoModifier, {100,100});
+            QTest::mouseClick(live.viewport(), Qt::LeftButton, Qt::ShiftModifier, {150,200});
+            live.grab(); QCOMPARE(live.document()->documentLayout()->documentSize(), size);
+            QCOMPARE(live.verticalScrollBar()->maximum(), maximum);
+        }
+        live.selectAll(); live.copy(); QCOMPARE(doc->text(), source); QCOMPARE(live.parseCount(), parses);
+        QVERIFY(!live.toPlainText().contains("**"));
+    }
+    void selectionAndBoundaries()
+    {
+        std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
+        const QString source = "one **bold**\n\ntwo [label](/url)\n\n[ref]: /untouched\n";
+        doc->setText(source); std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
+        LiveEditor live(view.get()); live.resize(800,600); live.show();
+        auto cursor = live.textCursor(); cursor.setPosition(4); cursor.setPosition(8,QTextCursor::KeepAnchor); live.setTextCursor(cursor);
+        QTest::keyClicks(&live,"new"); QCOMPARE(doc->text(), QString("one **new**\n\ntwo [label](/url)\n\n[ref]: /untouched\n"));
+        live.editAt(doc->text().indexOf("two")); QTest::keyClick(&live,Qt::Key_Backspace);
+        QCOMPARE(doc->text(),QString("one **new**two [label](/url)\n\n[ref]: /untouched\n"));
+        live.selectAll(); QTest::keyClicks(&live,"replacement"); QCOMPARE(doc->text(),QString("replacement"));
+    }
+    void unicodeImeAndExternalChanges()
+    {
+        std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
+        const QString source = QString::fromUtf8("\u4e2d\u6587\u00a0\U0001f600\n\n**bold**\n");
+        doc->setText(source); std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
+        LiveEditor live(view.get()); live.resize(800,600); live.show(); live.editAt(2);
+        QInputMethodEvent preedit(QString::fromUtf8("\u8f93\u5165"),{}); QApplication::sendEvent(&live,&preedit); QCOMPARE(doc->text(),source);
+        QInputMethodEvent commit; commit.setCommitString(QString::fromUtf8("\u8f93\u5165\U0001f601")); QApplication::sendEvent(&live,&commit);
+        QCOMPARE(doc->text(),QString(source).insert(2,QString::fromUtf8("\u8f93\u5165\U0001f601")));
+        doc->setText("outside **bold**"); live.editAt(0); QTest::keyClicks(&live,"X"); QCOMPARE(doc->text(),QString("Xoutside **bold**"));
+        doc->setReadWrite(false); QTest::keyClicks(&live,"bad"); QCOMPARE(doc->text(),QString("Xoutside **bold**"));
+        doc->setReadWrite(true);
+        connect(doc.get(),&KTextEditor::Document::textChanged,doc.get(),[&] { if (doc->text().startsWith('x')) doc->insertText({0,0},"formatted "); });
+        live.editAt(0); QTest::keyClicks(&live,"x"); QCOMPARE(doc->text(),QString("formatted xXoutside **bold**"));
+        live.editAt(0); QTest::keyClicks(&live,"!"); QVERIFY(doc->text().startsWith("!formatted"));
     }
     void pastedImageIsEmbeddedAndUndoPreservesFile()
     {
@@ -70,156 +245,100 @@ private Q_SLOTS:
         LiveEditor live(view.get()); live.resize(800, 600); live.show(); live.editAt(10);
         QImage image(120, 80, QImage::Format_RGB32); image.fill(Qt::green);
         QApplication::clipboard()->setImage(image);
-        live.input()->paste();
+        live.paste();
         QVERIFY(doc->text().contains("![image](notes%20space.md.assets/"));
         const auto match = QRegularExpression(QStringLiteral("!\\[image\\]\\(([^)]+)\\)")).match(doc->text());
         QVERIFY(match.hasMatch());
         const auto file = directory.filePath(QUrl::fromPercentEncoding(match.captured(1).toUtf8()));
         QVERIFY(QFileInfo::exists(file));
         QCOMPARE(QImage(file).size(), image.size());
-        QTest::keyClick(live.input(), Qt::Key_Z, Qt::ControlModifier);
+        QTest::keyClick(&live, Qt::Key_Z, Qt::ControlModifier);
         QVERIFY(!doc->text().contains("![image]"));
         QVERIFY(QFileInfo::exists(file)); // Undo must never delete a possibly shared asset.
         QApplication::clipboard()->clear();
     }
-    void editPreservesSourceAndUndo()
+    void editorSplitCanShrinkWithoutNativeSurface()
     {
+        QSplitter split(Qt::Vertical);
+        split.setChildrenCollapsible(false);
+        new QWidget(&split);
         std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
-        const QString source = QString::fromUtf8("# \u6807\u9898 \U0001f600\n\nA **bold** paragraph.\n\n[ref]: /untouched\n");
-        doc->setText(source);
-        std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
-        LiveEditor live(view.get());
-        live.resize(800, 600); live.show();
-        const int offset = source.indexOf("paragraph");
-        live.editAt(offset);
-        const int parses = live.parseCount();
-        QTest::keyClicks(live.input(), "new ");
-        QCOMPARE(doc->text(), QString(source).insert(offset, "new "));
-        QCOMPARE(live.parseCount(), parses); // No full parse on individual keystrokes.
-        QTest::keyClick(live.input(), Qt::Key_Z, Qt::ControlModifier);
-        QVERIFY(doc->text().size() < source.size() + 4);
-        live.finishEditing();
-        QVERIFY(doc->text().endsWith("[ref]: /untouched\n"));
-    }
-    void externalEditsAndReadOnly()
-    {
-        std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
-        doc->setText("first\n\nsecond\n");
-        std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
-        LiveEditor live(view.get());
-        live.resize(800, 600); live.show(); live.editAt(2);
-        doc->insertText({0, 0}, "outside ");
-        QCOMPARE(live.activeStart(), -1);
-        QVERIFY(!live.input()->isEnabled());
-        QTRY_VERIFY(live.input()->isEnabled());
-        live.editAt(0);
-        doc->setReadWrite(false);
-        QTest::keyClicks(live.input(), "bad");
-        QCOMPARE(doc->text(), QString("outside first\n\nsecond\n"));
-        doc->setReadWrite(true);
-        QTest::keyClicks(live.input(), "ok ");
-        QVERIFY(doc->text().startsWith("ok outside"));
-    }
-    void selectionAndBoundaryDeletion()
-    {
-        std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
-        doc->setText("one\n\ntwo\n");
-        std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
-        LiveEditor live(view.get());
-        live.resize(800, 600); live.show(); live.editAt(5);
-        QTest::keyClick(live.input(), Qt::Key_Backspace);
-        QCOMPARE(doc->text(), QString("one\ntwo\n"));
-        QTest::keyClick(live.input(), Qt::Key_A, Qt::ControlModifier);
-        QCOMPARE(live.input()->textCursor().selectedText().size(), doc->text().size());
-        QTest::keyClicks(live.input(), "replacement");
-        QCOMPARE(doc->text(), QString("replacement"));
-    }
-    void viewportCache()
-    {
-        std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
-        doc->setText(QString("## Header\n\nParagraph **bold** text.\n\n").repeated(500));
-        std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
-        LiveEditor live(view.get());
-        live.resize(800, 600); live.show();
-        for (int i = 0; i < 30; ++i) {
-            live.verticalScrollBar()->setValue(i * 700);
-            live.grab();
-            QVERIFY(live.cachedDocuments() <= 48);
+        doc->setText("# Heading\n\nBody\n");
+        auto view = doc->createView(&split);
+        auto live = new LiveEditor(view, view);
+        live->setGeometry(view->rect());
+        live->show();
+        split.resize(900, 900); split.show();
+        for (int n = 0; n < 3; ++n) {
+            split.setSizes({200, 680}); QCoreApplication::processEvents();
+            const int grown = view->height();
+            split.setSizes({700, 180}); QCoreApplication::processEvents();
+            QVERIFY(view->height() < grown);
+            QVERIFY(view->height() <= 200);
+            QVERIFY(!live->testAttribute(Qt::WA_NativeWindow));
         }
-        QVERIFY(live.blockCount() >= 1000);
+        delete view;
     }
-    void unicodeImeAndNewBlock()
+    void emptyCellAndEscapeAndTheme()
     {
         std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
-        const QString source = QString::fromUtf8("\u4e2d\u6587\u00a0\U0001f600\u2028\u539f\u6587\u2029\u4fdd\u7559\n\nnext\n");
-        doc->setText(source);
-        std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
-        LiveEditor live(view.get());
-        live.resize(800, 600); live.show(); live.editAt(2);
-        QInputMethodEvent preedit(QString::fromUtf8("\u8f93\u5165"), {});
-        QApplication::sendEvent(live.input(), &preedit);
-        QCOMPARE(doc->text(), source);
-        QInputMethodEvent commit;
-        commit.setCommitString(QString::fromUtf8("\u8f93\u5165\U0001f601"));
-        QApplication::sendEvent(live.input(), &commit);
-        QCOMPARE(doc->text(), QString(source).insert(2, QString::fromUtf8("\u8f93\u5165\U0001f601")));
-        live.finishEditing();
-        doc->setText("# title");
-        live.refresh(); live.editAt(7);
-        QTest::keyClick(live.input(), Qt::Key_Return);
-        QCoreApplication::processEvents();
-        QCOMPARE(doc->text(), QString("# title\n"));
-        QTest::keyClicks(live.input(), "next");
-        QCOMPARE(doc->text(), QString("# title\nnext"));
+        doc->setText("| a | b |\n| --- | --- |\n|  | value |\n");
+        std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr)); view->resize(800,600); view->show(); view->activateWindow();
+        const QFont font(QStringLiteral("DejaVu Sans Mono"),12); view->setConfigValue(QStringLiteral("font"),font);
+        LiveEditor live(view.get(),view.get()); live.resize(800,600); live.show(); live.setFocus();
+        QCOMPARE(live.font().family(),font.family());
+        QCOMPARE(live.palette().color(QPalette::Base),QColor(view->theme().editorColor(KSyntaxHighlighting::Theme::BackgroundColor)));
+        QTextTable *table=nullptr;
+        for (auto b=live.document()->begin();b.isValid()&&!table;b=b.next()) { QTextCursor c(b); table=c.currentTable(); }
+        QVERIFY(table); live.setTextCursor(table->cellAt(1,0).firstCursorPosition()); QTest::keyClicks(&live,"X");
+        QCOMPARE(doc->text(),QString("| a | b |\n| --- | --- |\n|  X| value |\n"));
+        doc->setText("| a | b | c |\n| --- | --- | --- |\n| value |\n"); live.refresh(); table=nullptr;
+        for (auto b=live.document()->begin();b.isValid()&&!table;b=b.next()) { QTextCursor c(b); table=c.currentTable(); }
+        QVERIFY(table); live.setTextCursor(table->cellAt(1,2).firstCursorPosition()); QTest::keyClicks(&live,"X");
+        QCOMPARE(doc->text(),QString("| a | b | c |\n| --- | --- | --- |\n| value | |  X\n"));
+        QAction closePanel(view.get()); closePanel.setShortcut(QKeySequence(Qt::Key_Escape)); view->addAction(&closePanel);
+        QSignalSpy closed(&closePanel,&QAction::triggered); QTest::qWait(20);
+        QTest::keyClick(&live,Qt::Key_Escape); QCOMPARE(closed.count(),1); QVERIFY(live.isVisible());
+        const auto source=doc->text(); QTest::keyClick(&live,Qt::Key_Return,Qt::ControlModifier); QCOMPARE(doc->text(),source);
+        doc->setText("```python\ndef energy(mass):\n    return mass * 2\n```\n"); live.refresh();
+        live.document()->documentLayout()->documentSize();
+        QVERIFY(live.toPlainText().contains("def energy(mass):"));
+        for (auto b=live.document()->begin();b.isValid();b=b.next()) if (!b.text().isEmpty()) QVERIFY(b.layout()->lineCount()>0);
     }
-    void randomEditsAndLatency()
+    void pointerAndVisibleCaretNeverScroll()
     {
+        QTemporaryDir directory; const auto path=directory.filePath("tall.png");
+        QImage image(300,640,QImage::Format_RGB32); image.fill(Qt::green); QVERIFY(image.save(path));
         std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
-        QString expected = "# Heading\n\nkeep **formatting** and [references][x]\n\n[x]: /local\n";
-        doc->setText(expected);
-        std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
-        LiveEditor live(view.get());
-        live.resize(800, 600); live.show(); live.editAt(11);
-        const int parses = live.parseCount();
-        QElapsedTimer timer; timer.start();
-        for (int i = 0; i < 300; ++i) {
-            auto cursor = live.input()->textCursor();
-            const int position = (i * 17) % (live.activeEnd() - live.activeStart());
-            cursor.setPosition(position);
-            live.input()->setTextCursor(cursor);
-            const QString insertion = i % 2 ? QString::fromUtf8("\u4e2d") : QString("x");
-            expected.insert(live.activeStart() + position, insertion);
-            cursor.insertText(insertion);
-            QCOMPARE(doc->text(), expected);
+        const QString source=QString("Above paragraph\n\n").repeated(10)+"![tall]("+path+")\n\n"+QString("Below **paragraph** text\n\n").repeated(60);
+        doc->setText(source); std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
+        LiveEditor live(view.get()); live.resize(800,400); live.show(); QTest::qWait(30);
+        const auto geometry=live.document()->documentLayout()->documentSize(); const int parses=live.parseCount();
+        for (int top : {0,150,300,500,750,1000}) {
+            live.verticalScrollBar()->setValue(top); const int scroll=live.verticalScrollBar()->value();
+            for (const auto point : {QPoint(100,40),QPoint(100,200),QPoint(400,350)}) {
+                for (int i=0;i<4;++i) {
+                    QTest::mouseClick(live.viewport(),Qt::LeftButton,Qt::NoModifier,point);
+                    QCoreApplication::processEvents(); QCOMPARE(live.verticalScrollBar()->value(),scroll);
+                    QTest::mouseDClick(live.viewport(),Qt::LeftButton,Qt::NoModifier,point);
+                    QTest::mouseClick(live.viewport(),Qt::LeftButton,Qt::ShiftModifier,point+QPoint(40,0));
+                    QCoreApplication::processEvents(); QCOMPARE(live.verticalScrollBar()->value(),scroll);
+                    for (auto key : {Qt::Key_Left,Qt::Key_Right,Qt::Key_Up,Qt::Key_Down,Qt::Key_Home,Qt::Key_End}) {
+                        QTest::keyClick(&live,key); QTest::keyClick(&live,key,Qt::ShiftModifier);
+                        QCOMPARE(live.verticalScrollBar()->value(),scroll);
+                    }
+                    live.setTextCursor(live.cursorForPosition(point)); QCOMPARE(live.verticalScrollBar()->value(),scroll);
+                }
+            }
+            live.selectAll(); QCOMPARE(live.verticalScrollBar()->value(),scroll);
+            QTest::keyClick(&live,Qt::Key_Home,Qt::ControlModifier); QCOMPARE(live.verticalScrollBar()->value(),scroll);
+            QTest::keyClick(&live,Qt::Key_End,Qt::ControlModifier); QCOMPARE(live.verticalScrollBar()->value(),scroll);
+            QTest::qWait(30); QCOMPARE(live.verticalScrollBar()->value(),scroll);
         }
-        qInfo() << "300 source-preserving edits:" << timer.elapsed() << "ms";
-        QCOMPARE(live.parseCount(), parses);
-        QVERIFY(timer.elapsed() < 3000);
-    }
-    void fontPaletteAndScreenshot()
-    {
-        std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
-        doc->setText(QString::fromUtf8("# Markdown \u5373\u65f6\u7f16\u8f91\n\n"
-            "\u8fd9\u662f **\u539f\u751f Qt \u6e32\u67d3**\uff0c\u4f7f\u7528 Kate \u7684\u5b57\u4f53\u4e0e\u914d\u8272\u3002\u70b9\u51fb\u4efb\u610f\u6bb5\u843d\u5373\u53ef\u539f\u4f4d\u7f16\u8f91\u3002\n\n"
-            "## \u652f\u6301 CommonMark \u4e0e GFM\n\n"
-            "- [x] \u4fdd\u7559\u539f\u59cb Markdown \u683c\u5f0f\n- [x] \u590d\u7528 Kate \u6587\u6863\u4e0e\u64a4\u9500\u5386\u53f2\n- [ ] \u5b8c\u6210\u4e0b\u4e00\u6bb5\u6587\u5b57\n\n"
-            "| \u529f\u80fd | \u5b9e\u73b0 |\n| --- | --- |\n| \u6e32\u67d3 | cmark-gfm + QTextDocument |\n| \u7f16\u8f91 | \u5355\u4e2a\u539f\u751f\u6587\u672c\u63a7\u4ef6 |\n\n"
-            "> \u5207\u6362\u6bb5\u843d\u65f6\u6062\u590d\u9884\u89c8\uff1bEsc \u5b8c\u6210\u5f53\u524d\u5757\u3002\n\n"
-            "```cpp\nauto message = QStringLiteral(\"Hello, Kate!\");\n```\n"));
-        std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
-        const QFont font(QStringLiteral("DejaVu Sans Mono"), 12);
-        view->setConfigValue(QStringLiteral("font"), font);
-        LiveEditor live(view.get());
-        live.resize(1000, 800); live.show();
-        QCOMPARE(live.input()->font().family(), font.family());
-        QCOMPARE(live.palette().color(QPalette::Base), QColor(view->theme().editorColor(KSyntaxHighlighting::Theme::BackgroundColor)));
-        QFont changed = font; changed.setPointSize(14);
-        view->setConfigValue(QStringLiteral("font"), changed);
-        QTRY_COMPARE(live.input()->font().pointSize(), 14);
-        view->setConfigValue(QStringLiteral("font"), font);
-        live.grab().save(QStringLiteral("live-preview.png"));
-        live.editAt(doc->text().indexOf(QString::fromUtf8("\u8fd9\u662f")) + 2);
-        live.grab().save(QStringLiteral("live-editing.png"));
+        live.verticalScrollBar()->setValue(0);
+        QWheelEvent wheel(QPointF(100,100),live.viewport()->mapToGlobal(QPoint(100,100)),QPoint(),QPoint(0,-120),Qt::NoButton,Qt::NoModifier,Qt::NoScrollPhase,false);
+        QApplication::sendEvent(live.viewport(),&wheel); QVERIFY(live.verticalScrollBar()->value()>0);
+        QCOMPARE(live.document()->documentLayout()->documentSize(),geometry); QCOMPARE(live.parseCount(),parses); QCOMPARE(doc->text(),source);
     }
     void loadedPluginLifecycleAndSave()
     {
@@ -244,15 +363,14 @@ private Q_SLOTS:
         auto action = client->actionCollection()->action(QStringLiteral("markdown_live_toggle"));
         QVERIFY(action && action->isEnabled());
         QTRY_VERIFY(action->isChecked()); // Existing Markdown tabs open in RTR automatically.
-        QPointer<QAbstractScrollArea> surface(view->findChild<QAbstractScrollArea *>(QStringLiteral("markdownLiveEditor")));
+        QPointer<QTextEdit> surface(view->findChild<QTextEdit *>(QStringLiteral("markdownLiveEditor")));
         QVERIFY(surface && surface->isVisible());
         view->setFocus(); // Kate restores focus after automatic tab activation.
         QTRY_VERIFY(surface->hasFocus() || surface->isAncestorOf(QApplication::focusWidget()));
         QCOMPARE(surface->geometry(), view->rect());
         view->resize(1000, 700);
         QCOMPARE(surface->geometry(), view->rect());
-        QTest::keyClick(surface, Qt::Key_Return);
-        auto input = surface->findChild<QPlainTextEdit *>();
+        auto input = surface.data();
         QVERIFY(input && input->isVisible());
         QTest::keyClicks(input, "edit ");
         QVERIFY(doc->isModified());
@@ -269,7 +387,7 @@ private Q_SLOTS:
         QVERIFY(surface->isVisible());
         delete pluginView;
         QVERIFY(surface.isNull());
-        QVERIFY(doc->text().contains("outside edit"));
+        QVERIFY2(doc->text().contains("outside # edit"), qPrintable(doc->text()));
     }
     void autoStartsAfterMarkdownSaveAndNewView()
     {
@@ -297,66 +415,6 @@ private Q_SLOTS:
         host.view = view.get(); Q_EMIT window.viewChanged(view.get());
         QCoreApplication::processEvents(); QVERIFY(!action->isChecked());
         delete pluginView;
-    }
-    void escapeRemainsAvailableForPanelAndControlEnterFinishesBlock()
-    {
-        std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
-        doc->setText("# Heading\n\nBody\n");
-        std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
-        view->resize(800, 600); view->show(); view->activateWindow();
-        LiveEditor live(view.get(), view.get()); live.setGeometry(view->rect()); live.show(); live.setFocus();
-        QAction closePanel(view.get()); closePanel.setShortcut(QKeySequence(Qt::Key_Escape));
-        view->addAction(&closePanel); QSignalSpy closed(&closePanel, &QAction::triggered);
-        QTest::qWait(20);
-        QTest::keyClick(&live, Qt::Key_Escape);
-        QCOMPARE(closed.count(), 1); QVERIFY(live.isVisible());
-        live.editAt(2);
-        QTest::keyClick(live.input(), Qt::Key_Escape);
-        QCOMPARE(closed.count(), 2); QVERIFY(live.input()->isVisible());
-        QTest::keyClicks(live.input(), "Changed ");
-        const auto source = doc->text();
-        QTest::keyClick(live.input(), Qt::Key_Return, Qt::ControlModifier);
-        QVERIFY(live.input()->isHidden()); QVERIFY(live.isVisible()); QCOMPARE(doc->text(), source);
-    }
-    void editorSplitCanShrinkWithoutNativeSurface()
-    {
-        QSplitter split(Qt::Vertical);
-        split.setChildrenCollapsible(false);
-        new QWidget(&split);
-        std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
-        doc->setText("# Heading\n\nBody\n");
-        auto view = doc->createView(&split);
-        auto live = new LiveEditor(view, view);
-        live->setGeometry(view->rect());
-        live->show();
-        split.resize(900, 900); split.show();
-        for (int n = 0; n < 3; ++n) {
-            split.setSizes({200, 680}); QCoreApplication::processEvents();
-            const int grown = view->height();
-            split.setSizes({700, 180}); QCoreApplication::processEvents();
-            QVERIFY(view->height() < grown);
-            QVERIFY(view->height() <= 200);
-            QVERIFY(!live->testAttribute(Qt::WA_NativeWindow));
-            QVERIFY(!live->input()->testAttribute(Qt::WA_NativeWindow));
-        }
-        delete view;
-    }
-    void synchronousFormatterDoesNotLeaveStaleOffsets()
-    {
-        std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
-        doc->setText("paragraph\n");
-        std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
-        LiveEditor live(view.get());
-        live.resize(800, 600); live.show(); live.editAt(0);
-        connect(doc.get(), &KTextEditor::Document::textChanged, doc.get(), [&] {
-            if (doc->text().startsWith("x")) doc->insertText({0, 0}, "formatted ");
-        });
-        QTest::keyClicks(live.input(), "x");
-        QCOMPARE(doc->text(), QString("formatted xparagraph\n"));
-        QCOMPARE(live.activeStart(), -1);
-        live.editAt(0);
-        QTest::keyClicks(live.input(), "!");
-        QCOMPARE(doc->text(), QString("!formatted xparagraph\n"));
     }
 };
 QTEST_MAIN(EditorTest)

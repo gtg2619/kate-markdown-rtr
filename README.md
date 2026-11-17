@@ -2,9 +2,13 @@
 
 Native, editor-themed Markdown live editing for Kate, with embedded images and LaTeX math.
 
-Edit Markdown directly in **the current document's editor area**. Inactive blocks show
-rendered content; clicking a block reveals its source in place. Finish editing with Ctrl+Enter
-or move to another block. Your document tab, save workflow and undo history stay in Kate.
+Edit Markdown directly in **the current document's editor area** using one continuous rich
+text surface. Click to place the caret, drag to select, and type normally. Completed Markdown
+stays rendered while you edit; incomplete delimiters remain literal text. Clicking, selecting
+and scrolling never expand source or switch editing modes. Clicks, selection and caret
+repositioning preserve the vertical scroll offset, including beside tall images. Use the wheel,
+scrollbar or Page Up/Down to scroll; typing can follow the insertion point. Kate owns saving
+and undo.
 
 ![Live Markdown, images and equations in a real Kate window](docs/real-kate.png)
 
@@ -19,11 +23,10 @@ or move to another block. Your document tab, save workflow and undo history stay
   LaTeX math expressions.
 - Fonts, sizes, background, text, selection and syntax colors follow the active Kate
   editor configuration. Equations use MathJax math glyphs with the editor's size and text color.
-- Kate Markdown highlighting in the active source block and `KSyntaxHighlighting` for
-  rendered code blocks, using installed language definitions such as `cpp`, `python`,
+- `KSyntaxHighlighting` for rendered code blocks, using installed language definitions such as `cpp`, `python`,
   `js`, `tex` and `latex`.
 
-Try the [demo document](docs/demo.md) or see the [in-place editing screenshot](docs/real-kate-edit.png).
+Try the [demo document](docs/demo.md) or see the [rich text editing screenshot](docs/real-kate-edit.png).
 
 ## Build and run
 
@@ -50,16 +53,22 @@ cmake --build build --parallel 4
 1. Enable **Markdown RTR** in **Settings → Configure Kate → Plugins**.
 2. Open a `.md` file: live rendering starts automatically. Existing Markdown tabs also activate
    when the plugin is enabled. Saving an untitled document as `.md` activates it as well.
-3. Click a paragraph to edit it. **Ctrl+Enter** finishes the current block.
+3. Click to position the caret and type directly into the rendered text. Drag or Shift+click
+   to select across paragraphs. No source expansion is involved.
 4. Use **Ctrl+Shift+M** or **View → Markdown Live Editing** to turn RTR off or back on.
    A manual choice is remembered for that open view, including tab switches and Save As.
    New views default to live rendering. **Esc remains available for Kate's panels and dialogs.**
 
-Enter handles new blocks; arrow keys can move between blocks. Shift+arrow and Shift+click
-extend source selections. Ctrl+A expands the entire source in place and selects it.
-Ctrl+Z / Ctrl+Shift+Z use Kate's undo and redo history. Saving uses Kate's existing commands.
-Find, replace and go-to-line return to the source editor. Edit `[ ]` / `[x]` to change a task;
-editing a table reveals the source of that table.
+Enter creates a paragraph; Shift+Enter inserts a Markdown hard break. Inside a fenced code
+block, Enter inserts a literal newline. In tables, Enter and Tab move between cells.
+Ctrl+A selects the rendered document. Copy preserves the corresponding Markdown, including
+formatting and embedded objects. Ctrl+Z / Ctrl+Shift+Z use Kate's undo and redo history;
+Ctrl+S saves normally. Ctrl+Enter is retained as a harmless compatibility shortcut.
+
+Images and equations are atomic inline objects: select, copy, replace or delete them without
+revealing their source. To change an existing formula's TeX or a link/image destination,
+explicitly toggle RTR off with Ctrl+Shift+M. Native find, replace and go-to-line also return
+to Kate's source editor. Raw Markdown is never expanded by caret movement or selection.
 
 Install into the user directory configured above:
 
@@ -75,7 +84,7 @@ remove `~/.local/lib/qt6/plugins/kf6/ktexteditor/katemarkdownlive.so` and
 ## Images and equations
 
 Images use standard Markdown: `![description](images/example.png)`. Relative local paths
-resolve against the document's directory. Pasting an image into an active block saves a PNG
+resolve against the document's directory. Pasting an image saves a PNG
 under `<document filename>.assets/` next to the saved Markdown file and inserts a relative
 link. SHA-256 filenames deduplicate identical images. Undo removes the inserted Markdown
 but keeps the asset, which may be referenced elsewhere. Save an untitled document before
@@ -101,8 +110,9 @@ $$
 The math engine includes MathJax's `base`, `ams`, `newcommand`, `boldsymbol` and `mathtools`
 packages. Dollar signs inside code, links and image syntax are not treated as math;
 use `\$` for a literal dollar sign. Local macros apply only to their current formula.
-Pending or invalid equations fall back to editable TeX text. This is mathematical typesetting,
-not execution of complete LaTeX documents, external commands or dynamically loaded packages.
+Pending and invalid equations retain an object placeholder. Unclosed math delimiters stay
+plain text. The engine typesets math; it does not execute complete LaTeX documents, external
+commands or dynamically loaded packages.
 
 ## Implementation and limits
 
@@ -117,21 +127,23 @@ WebEngine or helper browser process. Normal plugin builds and runtime do not nee
 Rendering dependencies are bundled and hash-checked for offline builds and use. See
 [third-party details](third_party/README.md) for versions, licenses and bundle reproduction.
 
-The editor uses one input widget, lazy layout for visible blocks and at most 48 cached layouts.
-Ordinary keystrokes do not reparse the document. SVG and image caches are limited to 8 MiB
-and 16 MiB; raster resources are limited to 8 MiB per block. Each formula allows at most
-8192 characters, the formula queue allows 64 pending items, and conversions have a deadline.
-These are resource guards, not process isolation for arbitrary hostile input. Excessive math
-or densely repeated unclosed delimiters fall back to source text. The widget creates no native
-child windows and does not increase its minimum size with its current size, allowing Kate
-split panes to shrink normally.
+The editor uses one native `QTextEdit` and a source map for semantic text, escaped characters,
+entities, table cells and embedded objects. Interior word edits update that map incrementally;
+syntax changes reparse the document. Qt calculates document geometry before browsing, so
+scrolling does not replace estimated block heights. Image dimensions are read before painting;
+new asynchronous resources, font changes and window resizing can still change layout.
 
-This provides **block-based live editing**, not every Typora interaction. Use Shift+click or
-source mode for cross-block selections. Click positions in complex markup are matched by
-visible words. Clicking a link starts editing it. Raw HTML is inert. Mermaid, HTML embeds,
-equation numbering/references and math inside link labels are not supported.
-Documents above 1,048,576 UTF-16 units or about 4000 blocks, including whitespace blocks,
-return to Kate's source editor. Individual blocks above 65,536 UTF-16 units display as source.
+Math SVG and raster caches each allow 8 MiB; decoded image caching allows 16 MiB. Each formula
+allows at most 8192 characters, the formula queue allows 64 pending items, and conversions
+have a deadline. These are resource guards, not process isolation for arbitrary hostile input.
+The widget creates no native child windows and keeps its minimum size independent of its
+current size, allowing Kate split panes to shrink normally.
+
+Raw HTML is inert. Mermaid, HTML embeds, equation numbering/references and math inside link
+labels are not supported. Text dragging copies its Markdown at the drop location. Blank lines
+follow Markdown paragraph semantics rather than showing every source newline. Documents above
+1,048,576 UTF-16 units or about 4000 AST blocks return to Kate's source editor. A source map
+that cannot be validated also returns to source mode instead of applying uncertain edits.
 
 ## Tests and license
 

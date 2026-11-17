@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(katemarkdownlive VERSION 0.2.1 LANGUAGES C CXX)
+project(katemarkdownlive VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -25,14 +25,14 @@ FetchContent_Declare(cmark
     EXCLUDE_FROM_ALL)
 FetchContent_MakeAvailable(cmark)
 
-add_library(markdown_core STATIC src/markdown.cpp src/mathsyntax.cpp)
+add_library(markdown_core STATIC src/markdown.cpp src/mathsyntax.cpp src/richparser.cpp)
 target_include_directories(markdown_core PUBLIC src PRIVATE
     ${cmark_SOURCE_DIR}/src ${cmark_BINARY_DIR}/src
     ${cmark_SOURCE_DIR}/extensions ${cmark_BINARY_DIR}/extensions)
 target_link_libraries(markdown_core PUBLIC Qt6::Widgets PRIVATE
     libcmark-gfm-extensions_static libcmark-gfm_static)
 
-add_library(markdown_editor STATIC src/liveeditor.cpp src/mathrenderer.cpp src/mediastore.cpp src/renderdocument.cpp)
+add_library(markdown_editor STATIC src/liveeditor.cpp src/richdocument.cpp src/mathrenderer.cpp src/mediastore.cpp)
 file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mathjax/engine.js" mathjax_hash)
 if(NOT mathjax_hash STREQUAL "b55101a92b62955da09703a1594080fd00ab48e6799cf6963316a0c7b0d5e474")
     message(FATAL_ERROR "MathJax bundle checksum mismatch; regenerate and review the vendored bundle")
@@ -63,7 +63,7 @@ if(BUILD_TESTING)
     add_test(NAME markdown COMMAND markdown_test)
     add_executable(editor_test tests/editor_test.cpp)
     target_link_libraries(editor_test PRIVATE markdown_editor Qt6::Test KF6::CoreAddons)
-    target_compile_definitions(editor_test PRIVATE PLUGIN_FILE="$<TARGET_FILE:katemarkdownlive>")
+    target_compile_definitions(editor_test PRIVATE PLUGIN_FILE="$<TARGET_FILE:katemarkdownlive>" TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     add_dependencies(editor_test katemarkdownlive)
     add_test(NAME editor COMMAND editor_test)
     add_executable(rendering_test tests/rendering_test.cpp)

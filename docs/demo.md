@@ -1,13 +1,13 @@
 # Markdown RTR
 
-Click any block to edit its Markdown source directly in Kate.
+Click to place the caret and type directly into the rendered text.
 
 ## Markdown and code
 
 **Bold**, *italic*, ~~strikethrough~~, `inline code` and a [Markdown link](https://commonmark.org).
 
 - [x] Edit and preview in the same place
-- [ ] Click this list to change a task
+- [ ] Select text without expanding its Markdown
 
 | Syntax | Rendering |
 | --- | --- |

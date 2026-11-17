@@ -182,7 +182,7 @@ private:
         editor->setGeometry(view->rect());
         editor->show();
         editor->raise();
-        editor->refresh();
+        editor->reloadResources();
         if (editor->blockCount() == 0) { m_choices[view] = false; disable(view, false); return; }
         if ((focus || focused) && m_window->activeView() == view) editor->setFocus();
         updateAction();

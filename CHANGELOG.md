@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 — 2026-11-17
+
+- Replace block source expansion with continuous native rich text editing.
+- Keep completed Markdown rendered during caret movement, selection and editing; leave
+  incomplete delimiters literal. Preserve formatting when replacing selected text.
+- Map edits to exact source spans, including Unicode, entities, escapes, links, tables,
+  code and atomic image/math objects. Keep Kate save and undo behavior.
+- Preserve the vertical scroll offset during repeated clicks, text selection and caret navigation,
+  including beside images taller than the viewport. Explicit scrolling remains available.
+- Finish document layout before browsing; clicks and scrolling do not discover new heights.
+- Paint images from a bounded cache without changing their geometry during repeated scrolling.
+- Update interior words incrementally and retain Kate themes and code highlighting.
+- Expand regressions for layout stability, source preservation, IME, clipboard, performance,
+  incomplete syntax and embedded objects.
+
 ## 0.2.1 — 2026-11-17
 
 - Enable live rendering automatically for Markdown views; retain manual opt-out while a view is open.
