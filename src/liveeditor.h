@@ -39,7 +39,6 @@ public:
     QSize sizeHint() const override { return {800, 600}; }
 
 Q_SIGNALS:
-    void sourceRequested();
     void limitReached();
 
 protected:

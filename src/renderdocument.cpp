@@ -87,19 +87,25 @@ RenderDocument::RenderDocument(const Block &block, const QUrl &base, const QFont
 
 QVariant RenderDocument::loadResource(int type, const QUrl &name)
 {
+    auto remember = [this, type, &name](const QImage &image) -> QVariant {
+        // QTextDocument does not cache the return value of an overridden loader.
+        // Cache by resource URL so repainting neither reloads nor recharges it.
+        addResource(type, name, image);
+        return image;
+    };
     QImage placeholder(150, 26, QImage::Format_ARGB32_Premultiplied);
     placeholder.fill(m_palette.color(QPalette::AlternateBase));
     QPainter painter(&placeholder);
     painter.setPen(m_palette.color(QPalette::Text));
     painter.drawText(placeholder.rect(), Qt::AlignCenter, QStringLiteral("[image unavailable]"));
     painter.end();
-    if (type != QTextDocument::ImageResource) return placeholder;
+    if (type != QTextDocument::ImageResource) return {};
     const auto item = m_media->request(m_base.resolved(name));
-    if (!item || item->image.isNull()) return placeholder;
+    if (!item || item->image.isNull()) return remember(placeholder);
     QImage image = item->image;
     if (image.width() > m_width || image.height() > 640) image = image.scaled(m_width, 640, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    if (m_imageBytes + image.sizeInBytes() > 8 * 1024 * 1024) return placeholder;
+    if (m_imageBytes + image.sizeInBytes() > 8 * 1024 * 1024) return remember(placeholder);
     m_imageBytes += image.sizeInBytes();
-    return image;
+    return remember(image);
 }
 }

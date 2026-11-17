@@ -562,12 +562,14 @@ bool LiveEditor::eventFilter(QObject *object, QEvent *event)
     if (object != m_input || (event->type() != QEvent::KeyPress && event->type() != QEvent::ShortcutOverride))
         return QAbstractScrollArea::eventFilter(object, event);
     auto key = static_cast<QKeyEvent *>(event);
+    const bool finish = (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter)
+        && (key->modifiers() & ~Qt::KeypadModifier) == Qt::ControlModifier;
     // Keep standard text editing shortcuts on this surface, including undo in Kate.
     if (event->type() == QEvent::ShortcutOverride) {
         if (key->matches(QKeySequence::Undo) || key->matches(QKeySequence::Redo)
             || key->matches(QKeySequence::SelectAll) || key->matches(QKeySequence::Cut)
             || key->matches(QKeySequence::Copy) || key->matches(QKeySequence::Paste)
-            || key->key() == Qt::Key_Escape) { key->accept(); return true; }
+            || finish) { key->accept(); return true; }
         return false;
     }
     if (key->matches(QKeySequence::Undo)) return history(false);
@@ -576,7 +578,7 @@ bool LiveEditor::eventFilter(QObject *object, QEvent *event)
         activateRange(0, int(m_blocks.size()) - 1, int(m_source.size()), 0);
         return true;
     }
-    if (key->key() == Qt::Key_Escape) { finishEditing(); return true; }
+    if (finish) { finishEditing(); return true; }
     if (m_first < 0) return false;
     if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
         // Let Qt complete the input event (and IME) before resolving new blocks.
@@ -624,7 +626,10 @@ void LiveEditor::keyPressEvent(QKeyEvent *event)
 {
     if (event->matches(QKeySequence::Undo)) { history(false); return; }
     if (event->matches(QKeySequence::Redo)) { history(true); return; }
-    if (event->key() == Qt::Key_Escape) { Q_EMIT sourceRequested(); return; }
+    if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)
+        && (event->modifiers() & ~Qt::KeypadModifier) == Qt::ControlModifier) {
+        finishEditing(); event->accept(); return;
+    }
     if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
         editAt(m_view && m_document ? int(m_document->cursorToOffset(m_view->cursorPosition())) : 0);
         return;

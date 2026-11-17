@@ -243,9 +243,11 @@ private Q_SLOTS:
         QVERIFY(client);
         auto action = client->actionCollection()->action(QStringLiteral("markdown_live_toggle"));
         QVERIFY(action && action->isEnabled());
-        action->trigger();
+        QTRY_VERIFY(action->isChecked()); // Existing Markdown tabs open in RTR automatically.
         QPointer<QAbstractScrollArea> surface(view->findChild<QAbstractScrollArea *>(QStringLiteral("markdownLiveEditor")));
         QVERIFY(surface && surface->isVisible());
+        view->setFocus(); // Kate restores focus after automatic tab activation.
+        QTRY_VERIFY(surface->hasFocus() || surface->isAncestorOf(QApplication::focusWidget()));
         QCOMPARE(surface->geometry(), view->rect());
         view->resize(1000, 700);
         QCOMPARE(surface->geometry(), view->rect());
@@ -259,12 +261,62 @@ private Q_SLOTS:
         QCOMPARE(QString::fromUtf8(saved.readAll()), doc->text());
         action->trigger();
         QVERIFY(surface->isHidden());
+        Q_EMIT window.viewChanged(view.get());
+        QCoreApplication::processEvents();
+        QVERIFY(!action->isChecked() && surface->isHidden());
         doc->insertText({0, 0}, "outside ");
         action->trigger();
         QVERIFY(surface->isVisible());
         delete pluginView;
         QVERIFY(surface.isNull());
         QVERIFY(doc->text().contains("outside edit"));
+    }
+    void autoStartsAfterMarkdownSaveAndNewView()
+    {
+        QPluginLoader loader(QStringLiteral(PLUGIN_FILE));
+        auto factory = qobject_cast<KPluginFactory *>(loader.instance()); QVERIFY(factory);
+        std::unique_ptr<KTextEditor::Plugin> plugin(factory->create<KTextEditor::Plugin>(nullptr));
+        Host host; KTextEditor::MainWindow window(&host);
+        std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
+        doc->setText("# New document\n");
+        std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr, &window));
+        host.view = view.get(); view->resize(800, 600); view->show();
+        auto pluginView = plugin->createView(&window);
+        auto action = dynamic_cast<KXMLGUIClient *>(pluginView)->actionCollection()->action(QStringLiteral("markdown_live_toggle"));
+        QCoreApplication::processEvents(); QVERIFY(!action->isChecked());
+        QTemporaryDir directory;
+        QVERIFY(doc->saveAs(QUrl::fromLocalFile(directory.filePath("new.md"))));
+        QTRY_VERIFY(action->isChecked());
+        action->trigger(); QVERIFY(!action->isChecked());
+        QVERIFY(doc->saveAs(QUrl::fromLocalFile(directory.filePath("renamed.md"))));
+        QCoreApplication::processEvents(); QVERIFY(!action->isChecked());
+        std::unique_ptr<KTextEditor::View> second(doc->createView(nullptr, &window));
+        host.view = second.get(); second->resize(800, 600); second->show();
+        Q_EMIT window.viewCreated(second.get()); Q_EMIT window.viewChanged(second.get());
+        QTRY_VERIFY(action->isChecked());
+        host.view = view.get(); Q_EMIT window.viewChanged(view.get());
+        QCoreApplication::processEvents(); QVERIFY(!action->isChecked());
+        delete pluginView;
+    }
+    void escapeRemainsAvailableForPanelAndControlEnterFinishesBlock()
+    {
+        std::unique_ptr<KTextEditor::Document> doc(KTextEditor::Editor::instance()->createDocument(nullptr));
+        doc->setText("# Heading\n\nBody\n");
+        std::unique_ptr<KTextEditor::View> view(doc->createView(nullptr));
+        view->resize(800, 600); view->show(); view->activateWindow();
+        LiveEditor live(view.get(), view.get()); live.setGeometry(view->rect()); live.show(); live.setFocus();
+        QAction closePanel(view.get()); closePanel.setShortcut(QKeySequence(Qt::Key_Escape));
+        view->addAction(&closePanel); QSignalSpy closed(&closePanel, &QAction::triggered);
+        QTest::qWait(20);
+        QTest::keyClick(&live, Qt::Key_Escape);
+        QCOMPARE(closed.count(), 1); QVERIFY(live.isVisible());
+        live.editAt(2);
+        QTest::keyClick(live.input(), Qt::Key_Escape);
+        QCOMPARE(closed.count(), 2); QVERIFY(live.input()->isVisible());
+        QTest::keyClicks(live.input(), "Changed ");
+        const auto source = doc->text();
+        QTest::keyClick(live.input(), Qt::Key_Return, Qt::ControlModifier);
+        QVERIFY(live.input()->isHidden()); QVERIFY(live.isVisible()); QCOMPARE(doc->text(), source);
     }
     void editorSplitCanShrinkWithoutNativeSurface()
     {

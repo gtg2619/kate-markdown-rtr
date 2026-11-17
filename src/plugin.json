@@ -3,7 +3,7 @@
         "Name": "Markdown RTR",
         "Description": "Edit Markdown blocks in place with native, editor-themed live rendering",
         "Icon": "text-markdown",
-        "Version": "0.2.0",
+        "Version": "0.2.1",
         "License": "MIT",
         "Website": "https://github.com/gtg2619/kate-markdown-rtr"
     }

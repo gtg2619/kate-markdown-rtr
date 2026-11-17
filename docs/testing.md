@@ -5,13 +5,13 @@ Sanitizer builds use Clang 23.1.5. Recorded on 2026-11-17.
 
 ## Automated tests
 
-`scripts/test.sh` runs three Qt Test executables with 40 passing functional cases/data rows,
+`scripts/test.sh` runs three Qt Test executables with 43 passing functional cases/data rows,
 excluding setup and cleanup. CTest also runs ECM's metadata check, making 4 suites in total.
 Tests use isolated XDG directories and Qt's offscreen platform, leaving user Kate sessions
 untouched. HTTP image tests use a loopback mock server without external network requests.
 
-Local results: normal build 4/4 passed in approximately 4.5 seconds;
-ASan + UBSan + LeakSanitizer build 4/4 passed in approximately 9 seconds,
+Local 0.2.1 results: normal build 4/4 passed in approximately 4.2 seconds;
+ASan + UBSan + LeakSanitizer build 4/4 passed in approximately 8.1 seconds,
 with no suppressions or skipped cases.
 
 - CommonMark/GFM headings, emphasis, strikethrough, tables, tasks, reference links and code languages.
@@ -34,6 +34,13 @@ with no suppressions or skipped cases.
 - Pasted image files, relative paths, undo retaining assets, Unicode filenames, scaling,
   missing/corrupt/oversized images.
 - Asynchronous image downloads, default-disabled remote access, cancellation/retry and queue cleanup.
+- Repeated image resource requests and painting retain the image instead of charging the
+  per-block byte limit on every repaint. This regression failed before the cache fix.
+- Automatic activation for existing/new Markdown views and Save As, with manual opt-out
+  preserved across tab switches and filename changes. Focus restored by Kate is transferred
+  to RTR, preventing input from reaching the covered source editor.
+- Esc remains available to a host panel-close action in both rendered and block-editing modes;
+  Ctrl+Enter finishes a block without inserting a newline.
 
 A local RelWithDebInfo run parsed 82,890 UTF-16 units / 4000 blocks in 9 ms.
 Three hundred source-preserving edits took approximately 0.33 seconds, including KTextEditor
@@ -59,7 +66,7 @@ ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
 ## Real Kate smoke check
 
 Load the built plugin into an isolated D-Bus/Xvfb Kate session, enable it and send actual
-keyboard events: Ctrl+Shift+M → Enter → edit the heading → Ctrl+S → Esc.
+keyboard events: automatic live rendering → Enter → edit the heading → Ctrl+S → Ctrl+Enter.
 Use [demo.md](demo.md) with a relative SVG image and compare the saved file byte for byte
 against the expected edit. Inspect table equations, code highlighting, inline math, display
 `aligned` math and the local image. Capture the entire Kate window:

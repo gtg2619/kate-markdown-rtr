@@ -12,6 +12,7 @@
 #include <QApplication>
 #include <QEvent>
 #include <QHash>
+#include <QSet>
 #include <QTimer>
 
 using MarkdownLive::LiveEditor;
@@ -37,8 +38,23 @@ public:
         connect(m_remoteImages, &QAction::toggled, this, [this](bool enabled) {
             for (auto editor : std::as_const(m_editors)) if (editor) editor->setRemoteImagesEnabled(enabled);
         });
-        connect(window, &KTextEditor::MainWindow::viewChanged, this, &MarkdownPluginView::updateAction);
+        connect(window, &KTextEditor::MainWindow::viewChanged, this, [this] {
+            schedule(m_window->activeView());
+            updateAction();
+        });
         connect(window, &KTextEditor::MainWindow::viewCreated, this, &MarkdownPluginView::hook);
+        connect(qApp, &QApplication::focusChanged, this, [this](QWidget *, QWidget *focus) {
+            const auto view = m_window->activeView();
+            const auto editor = m_editors.value(view);
+            if (!focus || !view || !editor || editor->isHidden() || editor == focus || editor->isAncestorOf(focus)) return;
+            if (focus != view && !view->isAncestorOf(focus)) return;
+            // Kate can restore focus to its internal editor after the overlay has
+            // opened. Do not leave keyboard input routed to the covered source view.
+            QTimer::singleShot(0, this, [this, editor, target = QPointer<QWidget>(focus)] {
+                if (editor && target && !editor->isHidden() && m_window->activeView() == editor->sourceView()
+                    && QApplication::focusWidget() == target) editor->setFocus();
+            });
+        });
         for (auto view : window->views()) hook(view);
         if (window->guiFactory()) window->guiFactory()->addClient(this);
         updateAction();
@@ -69,9 +85,13 @@ private:
 
     void hook(KTextEditor::View *view)
     {
-        connect(view, &QObject::destroyed, this, [this, view] { m_editors.remove(view); });
-        connect(view->document(), &KTextEditor::Document::documentUrlChanged, this, &MarkdownPluginView::updateAction);
-        connect(view->document(), &KTextEditor::Document::highlightingModeChanged, this, &MarkdownPluginView::updateAction);
+        if (m_hooked.contains(view)) return;
+        m_hooked.insert(view);
+        connect(view, &QObject::destroyed, this, [this, view] {
+            m_editors.remove(view); m_choices.remove(view); m_pending.remove(view); m_hooked.remove(view);
+        });
+        connect(view->document(), &KTextEditor::Document::documentUrlChanged, this, [this, view] { schedule(view); });
+        connect(view->document(), &KTextEditor::Document::highlightingModeChanged, this, [this, view] { schedule(view); });
         // Native search UI lives inside the original view; reveal it for these actions.
         for (const char *name : {"edit_find", "edit_replace", "go_goto_line"}) {
             if (auto action = view->actionCollection()->action(QString::fromLatin1(name)))
@@ -82,6 +102,22 @@ private:
                     QTimer::singleShot(0, action, &QAction::trigger);
                 });
         }
+        schedule(view);
+    }
+
+    void schedule(KTextEditor::View *view)
+    {
+        if (!view || m_pending.contains(view)) return;
+        m_pending.insert(view);
+        // Kate may still be restoring a tab or detecting its document type.
+        QTimer::singleShot(0, this, [this, guard = QPointer<KTextEditor::View>(view)] {
+            if (!guard) return;
+            auto view = guard.data();
+            m_pending.remove(view);
+            if (markdown(view->document()) && m_choices.value(view, true)) enable(view, false);
+            else disable(view, false);
+            updateAction();
+        });
     }
 
     static bool markdown(KTextEditor::Document *document)
@@ -100,12 +136,13 @@ private:
         m_toggle->setChecked(editor && !editor->isHidden());
     }
 
-    void disable(KTextEditor::View *view)
+    void disable(KTextEditor::View *view, bool focus = true)
     {
         if (const auto editor = m_editors.value(view)) {
+            const bool focused = editor->hasFocus() || editor->isAncestorOf(QApplication::focusWidget());
             editor->finishEditing();
             editor->hide();
-            view->setFocus();
+            if ((focus || focused) && m_window->activeView() == view) view->setFocus();
         }
         updateAction();
     }
@@ -114,8 +151,16 @@ private:
     {
         const auto view = m_window->activeView();
         if (!view) return;
+        m_choices[view] = enabled;
         if (!enabled) { disable(view); return; }
+        enable(view, true);
+    }
+
+    void enable(KTextEditor::View *view, bool focus)
+    {
         auto editor = m_editors.value(view);
+        if (editor && !editor->isHidden()) return;
+        const bool focused = view->hasFocus() || view->isAncestorOf(QApplication::focusWidget());
         if (!editor) {
             // A child overlay keeps Kate's real document tab, save actions, split
             // ownership, modified flag and close confirmation fully intact.
@@ -123,8 +168,8 @@ private:
             editor->setRemoteImagesEnabled(m_remoteImages->isChecked());
             m_editors.insert(view, editor);
             view->installEventFilter(this);
-            connect(editor, &LiveEditor::sourceRequested, this, [this, view] { disable(view); });
             connect(editor, &LiveEditor::limitReached, this, [this, view] {
+                m_choices[view] = false;
                 disable(view);
                 auto message = new KTextEditor::Message(
                     i18n("This document exceeds the live rendering limit. Continue editing in Kate's source view."),
@@ -138,8 +183,8 @@ private:
         editor->show();
         editor->raise();
         editor->refresh();
-        if (editor->blockCount() == 0) { disable(view); return; }
-        editor->setFocus();
+        if (editor->blockCount() == 0) { m_choices[view] = false; disable(view, false); return; }
+        if ((focus || focused) && m_window->activeView() == view) editor->setFocus();
         updateAction();
     }
 
@@ -147,6 +192,8 @@ private:
     QAction *m_toggle;
     QAction *m_remoteImages;
     QHash<KTextEditor::View *, QPointer<LiveEditor>> m_editors;
+    QHash<KTextEditor::View *, bool> m_choices;
+    QSet<KTextEditor::View *> m_pending, m_hooked;
 };
 
 class MarkdownPlugin : public KTextEditor::Plugin

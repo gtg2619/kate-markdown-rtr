@@ -3,7 +3,7 @@
 Native, editor-themed Markdown live editing for Kate, with embedded images and LaTeX math.
 
 Edit Markdown directly in **the current document's editor area**. Inactive blocks show
-rendered content; clicking a block reveals its source in place. Finish editing with Esc
+rendered content; clicking a block reveals its source in place. Finish editing with Ctrl+Enter
 or move to another block. Your document tab, save workflow and undo history stay in Kate.
 
 ![Live Markdown, images and equations in a real Kate window](docs/real-kate.png)
@@ -48,9 +48,12 @@ cmake --build build --parallel 4
 ```
 
 1. Enable **Markdown RTR** in **Settings → Configure Kate → Plugins**.
-2. Open a `.md` file and press **Ctrl+Shift+M**, or select **View → Markdown Live Editing**.
-3. Click a paragraph to edit it. Esc finishes the current block; another Esc or
-   Ctrl+Shift+M returns to Kate's source editor.
+2. Open a `.md` file: live rendering starts automatically. Existing Markdown tabs also activate
+   when the plugin is enabled. Saving an untitled document as `.md` activates it as well.
+3. Click a paragraph to edit it. **Ctrl+Enter** finishes the current block.
+4. Use **Ctrl+Shift+M** or **View → Markdown Live Editing** to turn RTR off or back on.
+   A manual choice is remembered for that open view, including tab switches and Save As.
+   New views default to live rendering. **Esc remains available for Kate's panels and dialogs.**
 
 Enter handles new blocks; arrow keys can move between blocks. Shift+arrow and Shift+click
 extend source selections. Ctrl+A expands the entire source in place and selects it.

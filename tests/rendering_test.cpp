@@ -117,6 +117,24 @@ private Q_SLOTS:
         QTRY_VERIFY_WITH_TIMEOUT(media.request(url), 5000);
         QCOMPARE(media.request(url)->image.size(), QSize(24, 16));
     }
+    void repeatedImageLayoutKeepsResourceAvailable()
+    {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("photo.png");
+        QImage original(1200, 800, QImage::Format_RGB32); original.fill(Qt::green);
+        QVERIFY(original.save(path));
+        MediaStore media; MathRenderer math;
+        const auto block = parse("![photo](photo.png)\n").blocks.first();
+        RenderDocument document(block, QUrl::fromLocalFile(directory.path() + '/'), QFont(), QPalette(), {}, 600, 1, &math, &media);
+        for (int i = 0; i < 80; ++i) {
+            const auto image = document.resource(QTextDocument::ImageResource, QUrl("photo.png")).value<QImage>();
+            QCOMPARE(image.size(), QSize(600, 400));
+            QCOMPARE(image.pixelColor(100, 100), QColor(Qt::green));
+            QImage canvas(640, 480, QImage::Format_RGB32); canvas.fill(Qt::white);
+            QPainter painter(&canvas); painter.translate(0, -(i % 5) * 20);
+            document.drawContents(&painter);
+        }
+    }
     void inlineAndDisplayDocument()
     {
         const auto parsed = parse("Text $\\frac{1}{2}$ after.\n\n$$\n\\sum_{n=1}^N n\n$$\n");
